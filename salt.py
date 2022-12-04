@@ -4,8 +4,8 @@ from string import punctuation
 #in order to work with per-cpu variables, we need to resolve some addresses
 #assuming we are working on a mono-cpu system, anyways
 cpu0_offset = gdb.lookup_global_symbol('__per_cpu_offset').value()[0]
-current_task_offset = gdb.lookup_global_symbol('current_task').value().address
-current_task_ptr_ptr = cpu0_offset/8 + current_task_offset  #the /8 is to account for pointer arithmetic, <struct task_struct **> has size 8
+# current_task_offset = gdb.lookup_global_symbol('current_task').value().address
+# current_task_ptr_ptr = cpu0_offset/8 + current_task_offset  #the /8 is to account for pointer arithmetic, <struct task_struct **> has size 8
 
 filter_on = False
 proc_filter = set()
@@ -28,7 +28,10 @@ def get_task_info():
   obtain information about the current task
   returns name and PID, but can be easily customized
   """
-  current = current_task_ptr_ptr.dereference().dereference()
+  # current = current_task_ptr_ptr.dereference().dereference()
+  sp_el0 = gdb.selected_frame().read_register('SP_EL0')
+  task_struct = gdb.lookup_type('struct task_struct')
+  current = sp_el0.cast(task_struct.pointer()).dereference()
   name = current['comm'].string()
   pid = int(current['pid'])
   return (name, pid)
@@ -234,7 +237,7 @@ class kmallocBP(gdb.Breakpoint):
 class kfreeFinishBP(gdb.FinishBreakpoint):
 
   def stop(self):
-    rdi = gdb.selected_frame().read_register('rdi') #XXX
+    #rdi = gdb.selected_frame().read_register('rdi') #XXX
     return False
     if rdi == 0 or rdi == ZERO_SIZE_PTR or rdi == 0x40000000: #XXX
       return False
