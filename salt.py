@@ -210,11 +210,24 @@ class kmallocSlabFinishBP(gdb.FinishBreakpoint):
     cache = ret['name'].string()
 
     if apply_filter(name, cache):
-      trace_info = 'kmalloc is accessing cache ' + cache  + ' on behalf of process "' + name + '", pid ' + str(pid)
+      # TODO: Return value?
+      trace_info = f'{name} (pid {pid}): {cache}'
+      f = get_function_frame("binder")
+      if f:
+        trace_info += f' [{f.function().name}]'
       salt_print(trace_info)
       history.append(('kmalloc', cache, name, pid))
 
     return False
+
+def get_function_frame(function_name: str):
+  f = gdb.selected_frame()
+  while f != None:
+      if f.function() != None and function_name in f.function().name:
+          break
+      f = f.older()
+
+  return f
 
 flag = 0
 class kmallocSlabBP(gdb.Breakpoint):
@@ -261,6 +274,44 @@ class kfreeBP(gdb.Breakpoint):
     #trace_info = 'freeing object at address ' + str(x)
     return False
 
+
+class kmemCacheAllocFinishBP(gdb.FinishBreakpoint):
+  def __init__(self, name, cache, pid):
+    # Not sure why I need to go up two frames
+    frame = gdb.newest_frame().older().older()
+    super(kmemCacheAllocFinishBP, self).__init__(frame, internal=True)
+    self.name = name
+    self.cache = cache
+    self.pid = pid
+
+  def stop(self):
+    size_t = gdb.selected_frame().architecture().integer_type(64, False)
+
+
+    trace_info = f'{self.name} (pid {self.pid}): {self.cache}'
+    ret = int(gdb.selected_frame().read_register("x0").cast(size_t))
+    trace_info += f' ({hex(ret)})'
+
+    f = get_function_frame("binder")
+    if f:
+      trace_info += f' [{f.function().name}]'
+
+    salt_print(trace_info)
+    history.append(('kmalloc', self.cache, self.name, self.pid))
+
+    return False
+
+class kmemCacheAllocTraceBP(gdb.Breakpoint):
+  def stop(self):
+    s = gdb.selected_frame().read_var('s')
+
+    name, pid = get_task_info()
+    cache = s['name'].string()
+
+    if apply_filter(name, cache):
+      kmemCacheAllocFinishBP(name, cache, pid)
+
+    return False
 
 class kmemCacheAllocBP(gdb.Breakpoint):
 
@@ -315,11 +366,31 @@ class salt (gdb.Command):
 
   def __init__ (self):
     super (salt, self).__init__ ("salt", gdb.COMMAND_USER)
+
+    # We can't put a breakpoint directly on kmalloc, as it's an inline function
+
+    # If the argument to kmalloc is a compile-time constant within the maximum
+    # cache size, kmem_cache_alloc_trace will handle the request. If tracing is
+    # not enabled, this will just call kmem_cache_alloc, but if tracing is
+    # enabled, kmem_cache_alloc will never be called, so we have to hook this
+    # function instead
+    kmemCacheAllocTraceBP('kmem_cache_alloc_trace', internal=True)
+
+    # Otherwise __kmalloc will handle the request
     kmallocBP('__kmalloc', internal=True)
+
+    # The __kmalloc BP set above won't do anything other than set a global flag
+    # The kmalloc_slab BP will actually log the allocation, as we'll have the
+    # cache name at that point. I'm guessing we can't just have this BP
+    # because there are probably some other codepaths that call it, and we just
+    # want the one through __kmalloc
     kmallocSlabBP('kmalloc_slab', internal=True)
+
     kfreeBP('kfree')
+
     kmemCacheAllocBP('kmem_cache_alloc', internal=True)
     kmemCacheFreeBP('kmem_cache_free', internal=True)
+
     newSlabBP('new_slab', internal=True)
 
   def invoke (self, arg, from_tty):
