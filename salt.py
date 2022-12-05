@@ -69,6 +69,18 @@ def get_next_cache(c1):
 
 salt_caches = []
 
+def swab(x):
+    return int(
+        ((x & 0x00000000000000FF) << 56)
+        | ((x & 0x000000000000FF00) << 40)
+        | ((x & 0x0000000000FF0000) << 24)
+        | ((x & 0x00000000FF000000) << 8)
+        | ((x & 0x000000FF00000000) >> 8)
+        | ((x & 0x0000FF0000000000) >> 24)
+        | ((x & 0x00FF000000000000) >> 40)
+        | ((x & 0xFF00000000000000) >> 56)
+    )
+
 def walk_caches():
   """
   walk through all the active kmem caches and collect information about them
@@ -83,9 +95,18 @@ def walk_caches():
 
   start = gdb.Value(int(slab_caches)-list_offset//8).cast(gdb.lookup_type('struct kmem_cache').pointer())
   nxt = get_next_cache(start)
+
   salt_caches[-1]['next'] = tohex(int(nxt), 64)
   salt_caches.append(dict())
   while True:
+    slab_cache_type = nxt.type
+    if slab_cache_type.code == gdb.TYPE_CODE_PTR:
+        slab_cache_type = slab_cache_type.target()
+
+    random = None
+    if "random" in slab_cache_type:
+        random = int(nxt["random"])
+
     objsize = int(nxt['object_size'])
     salt_caches[-1]['objsize'] = objsize
     offset = int(nxt['offset'])
@@ -98,7 +119,10 @@ def walk_caches():
     salt_caches[-1]['first_free'] = tohex(free, 64)
     salt_caches[-1]['freelist'] = []
     while free:
-      free = gdb.Value(free+offset).cast(gdb.lookup_type('uint64_t').pointer()).dereference()
+      addr = free
+      free = gdb.Value(addr+offset).cast(gdb.lookup_type('uint64_t').pointer()).dereference()
+      if random:
+        free ^= random ^ swab(addr + offset)
       salt_caches[-1]['freelist'].append(tohex(int(free), 64))
     nxt = get_next_cache(nxt)
     salt_caches[-1]['next'] = tohex(int(nxt), 64)
