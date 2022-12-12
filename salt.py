@@ -120,11 +120,13 @@ def walk_caches():
     salt_caches[-1]['freelist'] = []
     while free:
       addr = free
+      #print(hex(int(free)))
       free = gdb.Value(addr+offset).cast(gdb.lookup_type('uint64_t').pointer()).dereference()
       if random:
         free ^= random ^ swab(addr + offset)
       salt_caches[-1]['freelist'].append(tohex(int(free), 64))
     nxt = get_next_cache(nxt)
+    #print('nxt:', hex(int(nxt)))
     salt_caches[-1]['next'] = tohex(int(nxt), 64)
     if start == nxt:
       break
@@ -230,17 +232,48 @@ class kmallocSlabFinishBP(gdb.FinishBreakpoint):
         trace_info = 'kmalloc has been called with argument size=0 by process "' + name + '", pid ' + str(pid)
         salt_print(trace_info)
       return False
+    if ret == 0:
+      salt_print('null')
+      return False
 
     cache = ret['name'].string()
+    f = gdb.selected_frame()
+    kmallocFinishBP('*'+hex(f.block().end), cache)
 
-    if apply_filter(name, cache):
-      # TODO: Return value?
-      trace_info = f'{name} (pid {pid}): {cache}'
+    # if apply_filter(name, cache):
+    #   # TODO: Return value?
+    #   trace_info = f'{name} (pid {pid}): {cache}'
+    #   f = get_function_frame("binder")
+    #   if f:
+    #     trace_info += f' [{f.function().name}]'
+    #   salt_print(trace_info)
+    #   history.append(('kmalloc', cache, name, pid))
+
+    return False
+
+class kmallocFinishBP(gdb.Breakpoint):
+  def __init__(self, addr, cache):
+    super(kmallocFinishBP, self).__init__(addr, temporary=True, internal=True)
+    self.cache = cache
+
+  def stop(self):
+    name, pid = get_task_info()
+
+    ret = int(gdb.selected_frame().read_register('x0'))
+    if ret == ZERO_SIZE_PTR:
+      if apply_filter(name, -1):
+        trace_info = 'kmalloc has been called with argument size=0 by process "' + name + '", pid ' + str(pid)
+        salt_print(trace_info)
+      return False
+
+    if apply_filter(name, self.cache):
+      addr = hex((ret + 2**64) % 2**64)
+      trace_info = f'{name} (pid {pid}): {self.cache} ({addr})'
       f = get_function_frame("binder")
       if f:
         trace_info += f' [{f.function().name}]'
       salt_print(trace_info)
-      history.append(('kmalloc', cache, name, pid))
+      history.append(('kmalloc', self.cache, name, pid))
 
     return False
 
@@ -267,25 +300,25 @@ class kmallocBP(gdb.Breakpoint):
   def stop(self):
     global flag
     flag = 1
-    #kmallocSlabBP('kmalloc_slab', internal=True, temporary=True)
 
 
-
-class kfreeFinishBP(gdb.FinishBreakpoint):
+class kfreeFinishBP(gdb.Breakpoint):
+  def __init__(self, addr):
+    super(kfreeFinishBP, self).__init__('do_slab_free', temporary=True, internal=True)
+    self.addr = addr
 
   def stop(self):
-    #rdi = gdb.selected_frame().read_register('rdi') #XXX
-    return False
-    if rdi == 0 or rdi == ZERO_SIZE_PTR or rdi == 0x40000000: #XXX
-      return False
-
-    cache = rdi.cast(gdb.lookup_type('struct kmem_cache').pointer()).dereference()
+    page = gdb.selected_frame().read_var('page')
+    cache = page["slab_cache"]
     cache = cache['name'].string()
 
     name, pid = get_task_info()
 
     if apply_filter(name, cache):
-      trace_info = 'kfree is freeing an object from cache ' + cache  + ' on behalf of process "' + name + '", pid ' + str(pid)
+      trace_info = f'{name} (pid {pid}): kfree({self.addr}) {cache}'
+      f = get_function_frame("binder")
+      if f:
+        trace_info += f' [{f.function().name}]'
       salt_print(trace_info)
       history.append(('kfree', cache, name, pid))
     return False
@@ -293,9 +326,8 @@ class kfreeFinishBP(gdb.FinishBreakpoint):
 class kfreeBP(gdb.Breakpoint):
 
   def stop(self):
-    kfreeFinishBP(internal=True)
-    #x = gdb.selected_frame().read_var('x')
-    #trace_info = 'freeing object at address ' + str(x)
+    x = gdb.selected_frame().read_var('x')
+    kfreeFinishBP(x)
     return False
 
 
@@ -410,7 +442,7 @@ class salt (gdb.Command):
     # want the one through __kmalloc
     kmallocSlabBP('kmalloc_slab', internal=True)
 
-    kfreeBP('kfree')
+    kfreeBP('kfree', internal=True)
 
     kmemCacheAllocBP('kmem_cache_alloc', internal=True)
     kmemCacheFreeBP('kmem_cache_free', internal=True)
